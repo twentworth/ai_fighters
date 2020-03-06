@@ -12,8 +12,9 @@ def eval_genomes(genomes, config):
     cur_simulator = simulator()
 
     cur_simulator.create_ai_fighters_from_gennomes(genomes, config)
-
-    cur_simulator.run_full_simulation(10)
+    for obj in cur_simulator.all_fighters_dead_and_alive:
+        obj.is_invincible = True
+    cur_simulator.run_full_simulation(3)
 
 
 
@@ -48,19 +49,22 @@ def population_run(self, fitness_function, num_genomes_per_run, n=None):
 
         # Evaluate all genomes using the user-provided function.
         all_genomes = list(self.population.values())
-        random.shuffle(all_genomes)
-
-        # assert len(all_genomes) % num_genomes_per_run == 0
-        for i in range(0, len(all_genomes), num_genomes_per_run):
-            cur_genomes = all_genomes[i:i+num_genomes_per_run]
-            fitness_function(cur_genomes, self.config)
-            assert all(x.fitness is not None for x in all_genomes[i:i+num_genomes_per_run])
-        if not len(all_genomes) % num_genomes_per_run == 0:
-            cur_genomes = all_genomes[-num_genomes_per_run:]
-            fitness_function(cur_genomes, self.config)
-            assert all(x.fitness is not None for x in all_genomes[i:i + num_genomes_per_run])
+        for g in all_genomes: g.fitness = None #reset all fitnesses
+        for _ in range(3):#sum of best 5 matches for fitness
+            random.shuffle(all_genomes)
+            # assert len(all_genomes) % num_genomes_per_run == 0
+            for i in range(0, len(all_genomes), num_genomes_per_run):
+                cur_genomes = all_genomes[i:i+num_genomes_per_run]
+                fitness_function(cur_genomes, self.config)
+                assert all(x.fitness is not None for x in all_genomes[i:i+num_genomes_per_run])
+            if not len(all_genomes) % num_genomes_per_run == 0:
+                cur_genomes = all_genomes[-num_genomes_per_run:]
+                fitness_function(cur_genomes, self.config)
+                assert all(x.fitness is not None for x in all_genomes[i:i + num_genomes_per_run])
+        for g in all_genomes:
+            g.fitness *= k #ensure that staying at the top is good
         fitness_scores = [x.fitness for x in all_genomes]
-        print('fit range:: ',round(min(fitness_scores),3), '-',round(max(fitness_scores),3))
+        print('fit range:: ',round(min(fitness_scores),3), '->',round(max(fitness_scores),3))
         # Gather and report statistics.
         best = None
         for g in self.population.values():
@@ -128,7 +132,7 @@ def run(config_file, load_p = None, n=30):
     p.add_reporter(neat.Checkpointer(5))
 
     # Run for up to 300 generations.
-    population = population_run(p, eval_genomes, 3, n)
+    population = population_run(p, eval_genomes, 2, n)
 
 
     return population
@@ -143,7 +147,7 @@ if __name__ == '__main__':
     local_dir = os.path.dirname(__file__)
     config_path = os.path.join(local_dir, 'neat_config.ini')
     # population = neat.Checkpointer.restore_checkpoint(os.path.join(local_dir, 'neat-checkpoint-59'))
-    population = run(config_path, load_p= None, n=400)
+    population = run(config_path, load_p= None, n=8000)
     config = population.config
 
 

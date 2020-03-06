@@ -30,10 +30,10 @@ from pygame.locals import *
 import gzip
 import pymunk.pygame_util
 
-SCREEN_WIDTH = 1200
-SCREEN_HEIGHT = 800
+SCREEN_WIDTH = 500
+SCREEN_HEIGHT = 500
 SCREEN_TITLE = "Pymunk test"
-FRAMERATE = 25
+FRAMERATE = 10
 
 DIRECTIONS = {}
 for k in range(8):
@@ -99,30 +99,47 @@ def post_solve_bullet_hit(arbiter, space, data):
             print('Lost object:', bullet_shape)
         return
 
-    if fighter is not None: #we hit a wall
+    if fighter is not None and fighter != bullet.who_fired_me: #we hit an enemy
         fighter.health -= bullet.damage
         fighter.last_damage_time = data['arcade'].sim_time
+        bullet.who_fired_me.damage_dealt += bullet.damage
+        fighter.last_damage_enemy = bullet.who_fired_me
 
-        try:
-            bullet.who_fired_me.damage_dealt += bullet.damage
-            fighter.last_damage_enemy = bullet.who_fired_me
-        except:
-            fighter.last_damage_enemy = None
-            pass
     data['arcade'].delete_object(bullet)
+
+def warped_path(pos1, pos2, width, height):
+    """
+    returns the vector to the nearest direction to pos2 from pos1
+    :param pos1:
+    :param pos2:
+    :param width:
+    :param height:
+    :return:
+    """
+    smallest_vec = None
+    smallest_distance = float('inf')
+    for xadd in (-width, 0, width):
+        for yadd in (-height, 0, height):
+            pos2_2 = pos2 + pymunk.Vec2d(xadd, yadd)
+            diff = pos2_2 - pos1
+            if diff.length < smallest_distance:
+                smallest_vec = diff
+                smallest_distance = diff.length
+    return smallest_vec
 
 
 
 class Bullet(object):
     size = 10
-    mass = 2
+    mass = .1
     thrust_force = 200
-    max_velocity = 800
+    max_velocity = 400
     image = ":resources:images/items/coinGold.png"
     category = 0b100
     filter_mask = pymunk.ShapeFilter.ALL_MASKS ^ 0b100
-    damage = 10
+    damage = 3
     collision_type = 1
+
     def __init__(self, x, y, space, simulator):
         self.space = space
         self.simulator = simulator
@@ -139,6 +156,9 @@ class Bullet(object):
         self.space.add(self.body, self.shape)
         self.sprite = CircleSprite(self.shape, self.image)
         self.who_fired_me = None
+        self.distance_traveled = 0
+        self.prev_location = self.body.position
+        self.max_travel_distance_allowed = math.sqrt(self.simulator.width ** 2 + self.simulator.height ** 2)
     @property
     def x(self):
         return self.body.position.x
@@ -166,19 +186,25 @@ class Bullet(object):
         self.sprite.center_y = self.y
         self.sprite.angle = math.degrees(self.shape.body.angle)
     def update(self):
-        pass
+        self.distance_traveled += (self.position - self.prev_location).length
+        if self.distance_traveled > self.max_travel_distance_allowed:
+            self.simulator.delete_object(self)
+        self.prev_location = self.position
+
+
 
 
 
 class Fighter_base(Bullet):
     size = 16
     mass = 1
-    thrust_force = 600
-    max_velocity = 200
+    thrust_force = 1200
+    max_velocity = 120
     shoot_time = .15
     shoot_damage = .3
-    shoot_energy_restore = .5
-    max_shoot_energy = 4
+    shoot_energy_restore = .3
+    shoot_energy_restore = .3
+    max_shoot_energy = 2
     image = ":resources:images/items/coinGold.png"
     category = 0b10
     filter_mask = pymunk.ShapeFilter.ALL_MASKS
@@ -207,6 +233,8 @@ class Fighter_base(Bullet):
         self.last_update_time = 0
         self.last_damage_time = 0
         self.last_damage_enemy = None
+        self.is_invincible = False
+        self.max_travel_distance_allowed = float('inf')
     def shoot(self):
         if self.simulator.sim_time - self.last_shot_time > self.shoot_time and self.shoot_energy > 0:
             self.last_shot_time = self.simulator.sim_time
@@ -221,11 +249,25 @@ class Fighter_base(Bullet):
     def update(self):
         super().update()
 
+        # if self.x < 0:
+        #     self.body.position.x += self.simulator.width
+        # elif self.x > self.simulator.width:
+        #     self.body.position.x -= self.simulator.width
+        # if self.y < 0:
+        #     self.body.position.y += self.simulator.height
+        # elif self.y > self.simulator.height:
+        #     self.body.position.y -= self.simulator.height
 
-
+        if self.body.velocity.length < .05 * self.max_velocity:
+            self.body.velocity *= 0
         if self.is_thrusting:
             force = self.thrust_force * DIRECTIONS[self.body_direction]
-            self.body.apply_force_at_world_point(force, (self.x, self.y))  # , point=pymunk.Vec2d(x,y))
+        else:
+            vel_dir = self.body.velocity
+            vel_p = min(1, vel_dir.length / self.max_velocity)
+            if vel_dir.length > 0: vel_dir /= -vel_dir.length
+            force = self.thrust_force/5 * vel_dir * vel_p
+        self.body.apply_force_at_world_point(force, (self.x, self.y))  # , point=pymunk.Vec2d(x,y))
 
         if self.is_shooting: self.shoot()
 
@@ -243,7 +285,7 @@ class Fighter_base(Bullet):
         self.body.position.y = max(self.body.position.y, self.size)
         self.body.position.y = min(self.body.position.y, self.simulator.height - self.size)
 
-        if self.health <= 0:
+        if self.health <= 0 and not self.is_invincible:
             self.death_time = self.simulator.sim_time
             self.delete()
             self.simulator.delete_object(self)
@@ -282,21 +324,24 @@ class AI_Fighter(Fighter_base):
         self.model_output = None
 
     def update_ai_fitness(self, x):
-        self.ai_genome.fitness = x
-    def dist_health_to_targeted_enemy(self):
-        x0 = self.position
-        x0 += DIRECTIONS[self.gun_direction] * self.size + Bullet.size
-        max_distance = self.simulator.max_distance
-        x1 = x0 + DIRECTIONS[self.gun_direction] * max_distance
-        query_info = self.space.segment_query_first(x0, x1, Bullet.size, pymunk.ShapeFilter(mask=self.category))
-        if query_info is None:
-            return self.simulator.max_distance, Fighter_base.max_health
-        shape = query_info.shape
-        # x_2 = shape.body.position.x
-        # y_2 = shape.body.position.y
-        enemy_obj = self.simulator.shape_to_obj_map[shape]
-
-        return (self.position - shape.body.position).length / self.simulator.max_distance, enemy_obj.health / enemy_obj.max_health
+        if self.ai_genome.fitness is None:
+            self.ai_genome.fitness = 0
+        self.ai_genome.fitness += x
+    #
+    # def dist_health_to_targeted_enemy(self):
+    #     x0 = self.position
+    #     x0 += DIRECTIONS[self.gun_direction] * self.size + Bullet.size
+    #     max_distance = self.simulator.max_distance
+    #     x1 = x0 + DIRECTIONS[self.gun_direction] * max_distance
+    #     query_info = self.space.segment_query_first(x0, x1, Bullet.size, pymunk.ShapeFilter(mask=self.category))
+    #     if query_info is None:
+    #         return self.simulator.max_distance, Fighter_base.max_health
+    #     shape = query_info.shape
+    #     # x_2 = shape.body.position.x
+    #     # y_2 = shape.body.position.y
+    #     enemy_obj = self.simulator.shape_to_obj_map[shape]
+    #
+    #     return (self.position - shape.body.position).length / self.simulator.max_distance, enemy_obj.health / enemy_obj.max_health
 
     def nearest_enemy_dir(self):
         dist = float('inf')
@@ -304,39 +349,41 @@ class AI_Fighter(Fighter_base):
         for fighter in self.simulator.fighters:
             if fighter == self:
                 continue
-            cur_dist = math.sqrt((self.x - fighter.x) ** 2 + (self.y - fighter.y) ** 2)
+
+            fighter_dist = warped_path(self.body.position, fighter.body.position, self.simulator.width, self.simulator.height)
+            cur_dist = fighter_dist.length
             if cur_dist < dist:
                 dist = cur_dist
-                cur_fighter = fighter
+                cur_fighter_vec = fighter_dist
         if cur_fighter is None:
-            return 1,1
-        return (self.x - cur_fighter.x) / self.simulator.width, (self.y - cur_fighter.y) / self.simulator.height
+            return pymunk.Vec2d(1,1)
+        return cur_fighter_vec
 
     def get_model_input(self):
-        target_enemy_distance, target_enemy_health = self.dist_health_to_targeted_enemy()
-        nearest_enemy_distance_x, nearest_enemy_distance_y = self.nearest_enemy_dir()
 
-        nearest_enemy_distance = math.sqrt(nearest_enemy_distance_x**2 +  nearest_enemy_distance_y**2)
-        nearest_enemy_angle_percent = math.atan2(nearest_enemy_distance_x, nearest_enemy_distance_y) / 2 * math.pi
-        who_shot_me = self.last_damage_enemy
-        who_shot_me_x = 1000 if who_shot_me is None else who_shot_me.x
-        who_shot_me_y = 1000 if who_shot_me is None else who_shot_me.y
+
+        nearest_enemy_vec = self.nearest_enemy_dir()
+        total_len = math.sqrt(self.simulator.width ** 2 + self.simulator.height ** 2)
+
+        # who_shot_me = self.last_damage_enemy
+        # if who_shot_me is not None:
+        #     who_shot_me_vec = warped_path(self.body.position, who_shot_me.body.position, self.simulator.width, self.simulator.height)
+        # else:
+        #     who_shot_me_vec = pymunk.Vec2d(total_len * 2, 0)
+
+
+
         return [
-            self.x / self.simulator.width,
-            self.y / self.simulator.height,
-            self.body.velocity.x / self.simulator.width,
-            self.body.velocity.y / self.simulator.height,
-            self.health / self.max_health,
+            self.body.velocity.length /total_len,
+            self.body.velocity.angle,#velocity angle
             #x,y, health direction of nearest enemy
-            nearest_enemy_distance_x,
-            nearest_enemy_distance_y,
+            nearest_enemy_vec.length / total_len,
+            nearest_enemy_vec.angle,
             #dist to enemy in gun direction , ...
-            target_enemy_distance,
+            # who_shot_me_vec.length / total_len,
+            # who_shot_me_vec.angle,
             # enemy health in direction
-            target_enemy_health,
             self.simulator.sim_time - self.last_damage_time,
-            who_shot_me_x,
-            who_shot_me_y
         ]
     def set_model_output(self, output):
         """
@@ -390,19 +437,19 @@ class simulator(object):
         self.keys = set()
 
         # Create the box
-        floor_height = 0
-        body = pymunk.Body(body_type=pymunk.Body.STATIC)
-
-        for x,y in (([0, floor_height], [SCREEN_WIDTH, floor_height]),
-                    ([0, SCREEN_HEIGHT - floor_height], [SCREEN_WIDTH, SCREEN_HEIGHT - floor_height]),
-                    ([floor_height, floor_height], [floor_height, SCREEN_HEIGHT - floor_height]),
-                    ([SCREEN_WIDTH - floor_height, floor_height], [SCREEN_WIDTH - floor_height, SCREEN_HEIGHT - floor_height])):
-            shape = pymunk.Segment(body, x,y, 0.0)
-            shape.friction = 10
-            shape.collision_type = 3
-            shape.filter = pymunk.ShapeFilter(categories=0b1)
-            self.space.add(shape)
-            self.static_lines.append(shape)
+        # floor_height = 0
+        # body = pymunk.Body(body_type=pymunk.Body.STATIC)
+        #
+        # for x,y in (([0, floor_height], [SCREEN_WIDTH, floor_height]),
+        #             ([0, SCREEN_HEIGHT - floor_height], [SCREEN_WIDTH, SCREEN_HEIGHT - floor_height]),
+        #             ([floor_height, floor_height], [floor_height, SCREEN_HEIGHT - floor_height]),
+        #             ([SCREEN_WIDTH - floor_height, floor_height], [SCREEN_WIDTH - floor_height, SCREEN_HEIGHT - floor_height])):
+        #     shape = pymunk.Segment(body, x,y, 0.0)
+        #     shape.friction = 10
+        #     shape.collision_type = 3
+        #     shape.filter = pymunk.ShapeFilter(categories=0b1)
+        #     self.space.add(shape)
+        #     self.static_lines.append(shape)
 
 
 
@@ -460,16 +507,36 @@ class simulator(object):
         return math.sqrt(self.width ** 2 + self.height ** 2)
 
     def create_ai_fighters_from_gennomes(self, genomes, config, create_human=False):
+        prev_coords = []
+
+        def get_random_start():
+            k = True
+            while k:
+                new_coord = pymunk.Vec2d(Fighter_base.size + random.random() * (self.width - 2 * Fighter_base.size),
+                                         Fighter_base.size + random.random() * (self.height - 2 * Fighter_base.size))
+                if not any((x - new_coord).length < Fighter_base.size for x in prev_coords):
+                    k = False
+            prev_coords.append(new_coord)
+            new_vel = pymunk.Vec2d(Fighter_base.max_velocity,0) * random.random()
+            new_vel.rotate(2 * math.pi * random.random())
+            return new_coord, new_vel
+            pass
         x0 = pymunk.Vec2d(self.width/2, self.height/2)
         angle_add = 2 * math.pi * random.random()
         for i, genome in enumerate(genomes):
-            stvec = pymunk.Vec2d(1,0)
-            stvec.rotate(i * 2 * math.pi / (len(genomes) + create_human) + angle_add)
-            x1 = x0 + 150 * stvec
-            self.register_object(AI_Fighter(x1.x, x1.y, self.space, self, genome, config))
+            # stvec = pymunk.Vec2d(1,0)
+            # stvec.rotate(i * 2 * math.pi / (len(genomes) + create_human) + angle_add)
+            # x1 = x0 + 150 * stvec
+            x1, v1 = get_random_start()
+            new_fighter = AI_Fighter(x1.x, x1.y, self.space, self, genome, config)
+            new_fighter.shape.velocity = v1
+            self.register_object(new_fighter)
         if create_human:
-            x1 = x0 + 150 * pymunk.Vec2d(1, 0).rotate(len(genomes) * 2 * math.pi / (len(genomes) + create_human) + angle_add)
-            self.register_object(Player_Fighter(x1.x, x1.y, self.space, self))
+            # x1 = x0 + 150 * pymunk.Vec2d(1, 0).rotate(len(genomes) * 2 * math.pi / (len(genomes) + create_human) + angle_add)
+            x1, v1 = get_random_start()
+            new_fighter = Player_Fighter(x1.x, x1.y, self.space, self)
+            new_fighter.shape.velocity = v1
+            self.register_object(new_fighter)
 
     def register_object(self, obj):
         self.shape_to_obj_map[obj.shape] = obj
@@ -510,8 +577,9 @@ class simulator(object):
         tlast = time.time()
         for _ in range(int(t * FRAMERATE)):
             self.on_update()
-            time.sleep(max(1/FRAMERATE - (time.time() - tlast), 0))
             if display_sim:
+                time.sleep(max(1 / FRAMERATE - (time.time() - tlast), 0))
+                tlast = time.time()
                 screen.fill((255, 255, 255))
                 self.space.debug_draw(draw_options)
 
@@ -521,17 +589,25 @@ class simulator(object):
                     print(_ * FRAMERATE)
         total_time = 0
         total_damage = 0
+        total_health_removed = 0
         for obj in self.all_fighters_dead_and_alive:
             if obj.death_time <= 0:
                 obj.death_time = self.sim_time
             total_time += obj.death_time - obj.creation_time
             total_damage += obj.damage_dealt
+            total_health_removed += obj.max_health - obj.health #computing seperately since damage dealt can maybe miss damage on race conditions?
+            if total_damage == 0: total_damage = 1
+            if total_health_removed == 0: total_health_removed = 1
         # print('TT: ',total_time, 'total dmg: ', total_damage)
         #update fitnesses
         for obj in self.all_fighters_dead_and_alive:
             if isinstance(obj, AI_Fighter):
-                obj.update_ai_fitness(2 * (obj.death_time - obj.creation_time) - total_time + obj.damage_dealt/100)
-                X = 2 * (obj.death_time - obj.creation_time) - total_time + obj.damage_dealt/100
+                # obj.update_ai_fitness(2 * (obj.death_time - obj.creation_time) - total_time + obj.damage_dealt/100)
+                # obj.update_ai_fitness(obj.damage_dealt + obj.health + (obj.death_time - obj.creation_time)/total_time*10)
+                damage_taken = obj.max_health - obj.health
+                obj.update_ai_fitness(
+                    obj.damage_dealt / total_damage - damage_taken / total_health_removed) #-1 is worst, 1 is best
+                # X = 2 * (obj.death_time - obj.creation_time) - total_time + obj.damage_dealt/100
                 # if X is None:
                 #
                 #     print(2 * (obj.death_time - obj.creation_time) - total_time + obj.damage_dealt/100,
@@ -544,8 +620,34 @@ class simulator(object):
 
         for obj in self.all_objects:
             obj.update()
-            if not ((-20<= obj.x <= self.width+20) and (-20 <= obj.y <= self.height+20)):
-                self.delete_object(obj)
+        for obj in self.all_objects:
+            obj_pos_x = obj.body.position.x
+            obj_pos_y = obj.body.position.y
+
+            if obj_pos_x < 0: obj_pos_x += self.width
+            if obj_pos_x > self.width: obj_pos_x -= self.width
+            if obj_pos_y < 0: obj_pos_y += self.height
+            if obj_pos_y > self.height: obj_pos_y -= self.height
+
+            obj.body.position = pymunk.Vec2d(obj_pos_x, obj_pos_y)
+
+
+            # if not ((-20<= obj.x <= self.width+20) and (-20 <= obj.y <= self.height+20)):
+            #     if obj in self.fighters:
+            #         x_orig = obj.x
+            #         y_orig = obj.y
+            #         x = max(min(self.width - obj.size, obj.x), obj.size)
+            #         y = max(min(self.height - obj.size, obj.y), obj.size)
+            #         obj.body.position = pymunk.Vec2d(x,y)
+            #         vel_x = obj.body.velocity.x
+            #         vel_y = obj.body.velocity.y
+            #         if x != x_orig: vel_x = 0
+            #         if y != y_orig: vel_y = 0
+            #
+            #
+            #         obj.body.velocity = pymunk.Vec2d(vel_x, vel_y)
+            #     else:
+            #         self.delete_object(obj)
         self.space.step(1 / FRAMERATE)
         self.sim_time += 1 / FRAMERATE
 
@@ -576,6 +678,7 @@ class gameWindow(arcade.Window):
         os.chdir(file_path)
 
         arcade.set_background_color(arcade.color.DARK_SLATE_GRAY)
+        self.simulator.register_object(Player_Fighter(300, 300, self.simulator.space, self.simulator))
 
     def on_draw(self):
         """
