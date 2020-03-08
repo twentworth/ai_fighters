@@ -30,10 +30,10 @@ from pygame.locals import *
 import gzip
 import pymunk.pygame_util
 
-SCREEN_WIDTH = 500
-SCREEN_HEIGHT = 500
+SCREEN_WIDTH = 600
+SCREEN_HEIGHT = 600
 SCREEN_TITLE = "Pymunk test"
-FRAMERATE = 10
+FRAMERATE = 20
 
 DIRECTIONS = {}
 for k in range(8):
@@ -102,7 +102,9 @@ def post_solve_bullet_hit(arbiter, space, data):
     if fighter is not None and fighter != bullet.who_fired_me: #we hit an enemy
         fighter.health -= bullet.damage
         fighter.last_damage_time = data['arcade'].sim_time
+        # print('DAMAGE APPLIED:', bullet.damage, 'Prev Damage dealt:',bullet.who_fired_me.damage_dealt)
         bullet.who_fired_me.damage_dealt += bullet.damage
+        # print('New damage dealt:',bullet.who_fired_me.damage_dealt)
         fighter.last_damage_enemy = bullet.who_fired_me
 
     data['arcade'].delete_object(bullet)
@@ -137,12 +139,13 @@ class Bullet(object):
     image = ":resources:images/items/coinGold.png"
     category = 0b100
     filter_mask = pymunk.ShapeFilter.ALL_MASKS ^ 0b100
-    damage = 3
+    damage = 10
     collision_type = 1
 
     def __init__(self, x, y, space, simulator):
         self.space = space
         self.simulator = simulator
+        self.color = pygame.color.THECOLORS["blue"]
         self.moment = pymunk.moment_for_circle(self.mass, 0, self.size, (0, 0))
         self.body = pymunk.Body(self.mass, self.moment)
         self.body.position = pymunk.Vec2d(x, y)
@@ -158,7 +161,7 @@ class Bullet(object):
         self.who_fired_me = None
         self.distance_traveled = 0
         self.prev_location = self.body.position
-        self.max_travel_distance_allowed = math.sqrt(self.simulator.width ** 2 + self.simulator.height ** 2)
+        self.max_travel_distance_allowed = self.simulator.max_distance
     @property
     def x(self):
         return self.body.position.x
@@ -190,10 +193,15 @@ class Bullet(object):
         if self.distance_traveled > self.max_travel_distance_allowed:
             self.simulator.delete_object(self)
         self.prev_location = self.position
+    def change_color(self, x):
+        self.color = self.shape.color = x
 
-
-
-
+class training_Bullet(Bullet):
+    size = 20
+    damage = 2
+class mega_training_Bullet(Bullet):
+    size = 40
+    damage = 1
 
 class Fighter_base(Bullet):
     size = 16
@@ -203,8 +211,8 @@ class Fighter_base(Bullet):
     shoot_time = .15
     shoot_damage = .3
     shoot_energy_restore = .3
-    shoot_energy_restore = .3
     max_shoot_energy = 2
+    shoot_types = (Bullet, training_Bullet, mega_training_Bullet)
     image = ":resources:images/items/coinGold.png"
     category = 0b10
     filter_mask = pymunk.ShapeFilter.ALL_MASKS
@@ -235,17 +243,21 @@ class Fighter_base(Bullet):
         self.last_damage_enemy = None
         self.is_invincible = False
         self.max_travel_distance_allowed = float('inf')
+
     def shoot(self):
         if self.simulator.sim_time - self.last_shot_time > self.shoot_time and self.shoot_energy > 0:
-            self.last_shot_time = self.simulator.sim_time
-            cur_pos = self.position
-            offset = self.size + Bullet.size
-            new_position = cur_pos + DIRECTIONS[self.gun_direction] * offset
-            new_bullet = Bullet(new_position.x, new_position.y, self.space, self.simulator)
-            new_bullet.set_vel_direction_at_max(DIRECTIONS[self.gun_direction])
-            new_bullet.who_fired_me = self
-            self.simulator.register_object(new_bullet)
-            self.shoot_energy -= self.shoot_damage
+            for bullet_type in self.shoot_types:
+                self.last_shot_time = self.simulator.sim_time
+                cur_pos = self.position
+                new_bullet = bullet_type(0, 0, self.space, self.simulator)
+                offset = self.size + new_bullet.size + 1
+                new_position = cur_pos + DIRECTIONS[self.gun_direction] * offset
+                new_bullet.body.position = new_position
+                new_bullet.set_vel_direction_at_max(DIRECTIONS[self.gun_direction])
+                new_bullet.who_fired_me = self
+                new_bullet.change_color(self.color)
+                self.simulator.register_object(new_bullet)
+                self.shoot_energy -= self.shoot_damage
     def update(self):
         super().update()
 
@@ -290,7 +302,8 @@ class Fighter_base(Bullet):
             self.delete()
             self.simulator.delete_object(self)
 
-
+class target_Fighter(Fighter_base):
+    max_health = 40
 
 
 class Player_Fighter(Fighter_base):
@@ -326,7 +339,7 @@ class AI_Fighter(Fighter_base):
     def update_ai_fitness(self, x):
         if self.ai_genome.fitness is None:
             self.ai_genome.fitness = 0
-        self.ai_genome.fitness += x
+        self.ai_genome.fitness = self.ai_genome.fitness + x
     #
     # def dist_health_to_targeted_enemy(self):
     #     x0 = self.position
@@ -355,14 +368,15 @@ class AI_Fighter(Fighter_base):
             if cur_dist < dist:
                 dist = cur_dist
                 cur_fighter_vec = fighter_dist
+                cur_fighter = fighter
         if cur_fighter is None:
-            return pymunk.Vec2d(1,1)
-        return cur_fighter_vec
+            return pymunk.Vec2d(1,1), pymunk.Vec2d(0,0)
+        return cur_fighter_vec, cur_fighter.body.velocity
 
     def get_model_input(self):
 
 
-        nearest_enemy_vec = self.nearest_enemy_dir()
+        nearest_enemy_vec, nearest_enemy_vel = self.nearest_enemy_dir()
         total_len = math.sqrt(self.simulator.width ** 2 + self.simulator.height ** 2)
 
         # who_shot_me = self.last_damage_enemy
@@ -375,15 +389,17 @@ class AI_Fighter(Fighter_base):
 
         return [
             self.body.velocity.length /total_len,
-            self.body.velocity.angle,#velocity angle
+            self.body.velocity.angle / math.pi,#velocity angle
             #x,y, health direction of nearest enemy
             nearest_enemy_vec.length / total_len,
-            nearest_enemy_vec.angle,
+            nearest_enemy_vec.angle / math.pi,
+            nearest_enemy_vel.length / total_len,
+            nearest_enemy_vel.angle / math.pi,
             #dist to enemy in gun direction , ...
             # who_shot_me_vec.length / total_len,
             # who_shot_me_vec.angle,
             # enemy health in direction
-            self.simulator.sim_time - self.last_damage_time,
+
         ]
     def set_model_output(self, output):
         """
@@ -435,7 +451,7 @@ class simulator(object):
         self.processing_time = 0
 
         self.keys = set()
-
+        self.challenger = None
         # Create the box
         # floor_height = 0
         # body = pymunk.Body(body_type=pymunk.Body.STATIC)
@@ -506,7 +522,7 @@ class simulator(object):
     def max_distance(self):
         return math.sqrt(self.width ** 2 + self.height ** 2)
 
-    def create_ai_fighters_from_gennomes(self, genomes, config, create_human=False):
+    def create_ai_fighters_from_gennomes(self, genomes, config, create_human=False, challenger=None):
         prev_coords = []
 
         def get_random_start():
@@ -523,6 +539,19 @@ class simulator(object):
             pass
         x0 = pymunk.Vec2d(self.width/2, self.height/2)
         angle_add = 2 * math.pi * random.random()
+        if challenger is not None:
+            random.seed(challenger.seed)
+            x1, v1 = get_random_start()
+
+            if challenger.genome is not None:
+                self.challenger = new_fighter = AI_Fighter(x1.x, x1.y, self.space, self, challenger.genome, challenger.config)
+            else:
+                self.challenger = new_fighter = target_Fighter(x1.x, x1.y, self.space, self)
+
+            new_fighter.shape.velocity = v1
+            new_fighter.change_color(pygame.color.THECOLORS["red"])
+            self.register_object(new_fighter)
+
         for i, genome in enumerate(genomes):
             # stvec = pymunk.Vec2d(1,0)
             # stvec.rotate(i * 2 * math.pi / (len(genomes) + create_human) + angle_add)
@@ -537,6 +566,7 @@ class simulator(object):
             new_fighter = Player_Fighter(x1.x, x1.y, self.space, self)
             new_fighter.shape.velocity = v1
             self.register_object(new_fighter)
+        random.seed()
 
     def register_object(self, obj):
         self.shape_to_obj_map[obj.shape] = obj
@@ -587,6 +617,8 @@ class simulator(object):
                 pygame.display.set_mode((self.width, self.height))
                 if _%FRAMERATE == 0:
                     print(_ * FRAMERATE)
+            if len(self.fighters) <= 1:
+                break #end early if we win
         total_time = 0
         total_damage = 0
         total_health_removed = 0
@@ -605,14 +637,21 @@ class simulator(object):
                 # obj.update_ai_fitness(2 * (obj.death_time - obj.creation_time) - total_time + obj.damage_dealt/100)
                 # obj.update_ai_fitness(obj.damage_dealt + obj.health + (obj.death_time - obj.creation_time)/total_time*10)
                 damage_taken = obj.max_health - obj.health
+                # print('DAMAGE for obj:',obj.damage_dealt)
                 obj.update_ai_fitness(
-                    obj.damage_dealt / total_damage - damage_taken / total_health_removed) #-1 is worst, 1 is best
+                    obj.damage_dealt) #-1 is worst, 1 is best
                 # X = 2 * (obj.death_time - obj.creation_time) - total_time + obj.damage_dealt/100
                 # if X is None:
                 #
                 #     print(2 * (obj.death_time - obj.creation_time) - total_time + obj.damage_dealt/100,
                 #           obj.death_time, obj.creation_time, obj.damage_dealt)
         # print('done')
+
+        if self.challenger is None or self.challenger.health > 0:
+            return False
+        else:
+            return True
+
 
 
     def on_update(self, delta_time=None):

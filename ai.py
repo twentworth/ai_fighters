@@ -6,15 +6,35 @@ import random
 from game import simulator
 import pickle
 import gzip
+import copy
 
 
-def eval_genomes(genomes, config):
-    cur_simulator = simulator()
+def eval_genomes(genome, config, challengers):
 
-    cur_simulator.create_ai_fighters_from_gennomes(genomes, config)
-    for obj in cur_simulator.all_fighters_dead_and_alive:
-        obj.is_invincible = True
-    cur_simulator.run_full_simulation(3)
+
+    genome.fitness = 0
+    did_win_all = 0
+    for i, c in enumerate(challengers):
+        cur_simulator = simulator()
+        cur_simulator.create_ai_fighters_from_gennomes([genome], config, challenger=c)
+        did_cur_win = cur_simulator.run_full_simulation(c.sim_time)
+        if did_cur_win:
+            did_win_all += 1
+            genome.fitness = genome.fitness + 100
+
+    return did_win_all
+
+class challenger(object):
+    def __init__(self, genome, config, seed, sim_time):
+        self.genome = genome
+        self.config = config
+        self.seed = seed
+        self.sim_time = sim_time
+
+def create_challenger(genome, config, sim_time):
+    random.seed()
+    return challenger(genome, config, random.random(), sim_time)
+
 
 
 
@@ -42,28 +62,44 @@ def population_run(self, fitness_function, num_genomes_per_run, n=None):
         raise RuntimeError("Cannot have no generational limit with no fitness termination")
 
     k = 0
+    challengers = []
+
     while n is None or k < n:
         k += 1
-
+        if k > 0 and (k+1) % 5 == 0:
+            with open(f'challengers_{k}', 'wb+') as f:
+                pickle.dump({'challengers':challengers, 'genomes':all_genomes}, f)
         self.reporters.start_generation(self.generation)
 
         # Evaluate all genomes using the user-provided function.
         all_genomes = list(self.population.values())
+        if len(challengers) == 0:
+            for _ in range(10):
+                challengers.append(create_challenger(None, None, 3))
+            challengers.append(create_challenger(copy.deepcopy(all_genomes[0]), self.config, 7))
+
+
         for g in all_genomes: g.fitness = None #reset all fitnesses
-        for _ in range(3):#sum of best 5 matches for fitness
-            random.shuffle(all_genomes)
+
+        random.shuffle(all_genomes)
             # assert len(all_genomes) % num_genomes_per_run == 0
-            for i in range(0, len(all_genomes), num_genomes_per_run):
-                cur_genomes = all_genomes[i:i+num_genomes_per_run]
-                fitness_function(cur_genomes, self.config)
-                assert all(x.fitness is not None for x in all_genomes[i:i+num_genomes_per_run])
-            if not len(all_genomes) % num_genomes_per_run == 0:
-                cur_genomes = all_genomes[-num_genomes_per_run:]
-                fitness_function(cur_genomes, self.config)
-                assert all(x.fitness is not None for x in all_genomes[i:i + num_genomes_per_run])
-        for g in all_genomes:
-            g.fitness *= k #ensure that staying at the top is good
+        best_won = -1
+        for i in range(len(all_genomes)):
+            best_won = max(fitness_function(all_genomes[i], self.config, challengers), best_won)
+
+        # for g in all_genomes:
+        #     g.fitness *= k #ensure that staying at the top is good
         fitness_scores = [x.fitness for x in all_genomes]
+        print('challenger_Assessment: ', best_won, len(challengers) - 1)
+        if best_won > .7*(len(challengers)-1):
+            print('ADDING NEW CHALLENGER!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+            best_score = max(fitness_scores)
+            best_genomes = [x for x in all_genomes if x.fitness == best_score]
+            # random.shuffle(best_genomes)
+            # challengers.append(create_challenger(copy.deepcopy(best_genomes[0]), self.config, sim_time=7))
+            random.shuffle(all_genomes)
+            challengers.append(create_challenger(copy.deepcopy(all_genomes[0]), self.config, 7))
+
         print('fit range:: ',round(min(fitness_scores),3), '->',round(max(fitness_scores),3))
         # Gather and report statistics.
         best = None
@@ -132,7 +168,7 @@ def run(config_file, load_p = None, n=30):
     p.add_reporter(neat.Checkpointer(5))
 
     # Run for up to 300 generations.
-    population = population_run(p, eval_genomes, 2, n)
+    population = population_run(p, eval_genomes, 1, n)
 
 
     return population
@@ -146,8 +182,15 @@ if __name__ == '__main__':
     # current working directory.
     local_dir = os.path.dirname(__file__)
     config_path = os.path.join(local_dir, 'neat_config.ini')
-    # population = neat.Checkpointer.restore_checkpoint(os.path.join(local_dir, 'neat-checkpoint-59'))
-    population = run(config_path, load_p= None, n=8000)
+    population = None
+    population = neat.Checkpointer.restore_checkpoint(os.path.join(local_dir, 'neat-checkpoint-104'))
+    population.config.species_elitism = 2
+    population.config.compatibility_threshold = 2.3
+    # print(population.config.__dict__.keys())
+    # print(population.config.__dict__['species_elitism'])
+    # assert False
+
+    population = run(config_path, load_p= population, n=8000)
     config = population.config
 
 
